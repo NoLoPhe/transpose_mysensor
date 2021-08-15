@@ -1,18 +1,12 @@
 from torch.utils.data import DataLoader, Dataset, random_split
-import pickle
 import torch
-from utils import matrix_to_rotation_6d, SMPL_MAJOR_JOINTS
+from utils import matrix_to_rotation_6d
 import numpy as np
-from glob import glob
 
 
 class ActionDatasets(Dataset):
-    def __init__(self):
+    def __init__(self, filepath):
         super(ActionDatasets, self).__init__()
-        # self.files = glob("/home/lab1008/xd/transPose/amass_dataset/*.npz")
-        # filepath = self.files[0]
-        # filepath = "../acc2pos/dataset/merge_data_trans.npz"
-        filepath = "/home/lab1008/xd/merge_data_trans.npz"
         self.data = np.load(filepath, allow_pickle=True)
 
         self.poses = self.data['poses']
@@ -38,31 +32,37 @@ class ActionDatasets(Dataset):
             s_foot = torch.FloatTensor(all_s_foot)
 
         else:
-            root_velocity = None
-            s_foot = None
+            root_velocity =[]
+            s_foot = []
 
         all_ori = self.ori[idx]
         all_pose = self.poses[idx]
 
         all_pose_6d = []
         for pose in all_pose:
-            pose = np.array(pose).reshape(-1, 3, 3)
             all_pose_6d.append(matrix_to_rotation_6d(torch.FloatTensor(pose)))
 
+        
+        # 所有节点加速度
         all_acc = self.acc[idx]
+        acc = torch.FloatTensor(all_acc)
+        #所有关节位置
         all_point = self.point[idx]
-
         # 叶节点方向
-        ori = torch.FloatTensor(all_ori).reshape(-1, 6, 9)
+        ori = torch.FloatTensor(all_ori)
+        root_inv = ori[:, -1].inverse()
+        # normalize
 
+        all_acc[:, :-1] = torch.einsum("ijk,imk->imj", root_inv, acc[:, :-1] - acc[:, -1].reshape(-1, 1, 3))
+        all_acc[:, -1] = torch.einsum("ijk,ik->ij", root_inv, acc[:, -1])
+        
+        ori[:, :-1] = torch.einsum("ijk,itkm->itjm", root_inv, ori[:, :-1])
+        ori = ori.reshape(-1, 6, 9)
         # 所有节点的6d旋转
         all_pose_6d = torch.stack(all_pose_6d)
-        pose_6d = all_pose_6d[:, SMPL_MAJOR_JOINTS, :].reshape(-1, 15 * 6)
+        pose_6d = all_pose_6d.reshape(-1, 15 * 6)
         # 根节点方向
         root_ori = ori[:, -1, :]
-
-        # 所有节点加速度
-        acc = torch.FloatTensor(all_acc).reshape(-1, 6, 3)
 
         # 结合的x0输入
         x0 = torch.cat([acc, ori], 2).reshape(-1, 6 * 12)
@@ -87,6 +87,7 @@ def padding_fn(batch_data):
     batch_size = len(batch_data)
 
     sequence_lengths = np.array([s[1].shape[0] for s in batch_data], dtype=np.int32)
+
     max_len = max(sequence_lengths)
     sorted_indices = np.argsort(sequence_lengths)[::-1]
 
@@ -156,24 +157,36 @@ def padding_fn(batch_data):
 
 train_datasets = None
 
-
 def create_data_loader(batch_size):
     global train_datasets
     if train_datasets is None:
-        train_datasets = ActionDatasets()
-    test_datasets = train_datasets
-    split_rate = 0.8  # 训练集占整个数据集的比例
+        train_datasets = ActionDatasets("dataset/merge_data_all_no_std.npz")
+    test_datasets = ActionDatasets("dataset/test_no_std_300.npz")
+    split_rate = 0.99  # 训练集占整个数据集的比例
     train_len = int(split_rate * len(train_datasets))
     valid_len = len(train_datasets) - train_len
 
     train_sets, valid_sets = random_split(train_datasets, [train_len, valid_len])
 
     train_loader = DataLoader(train_sets, batch_size=batch_size, shuffle=True, drop_last=True, pin_memory=True,
-                              collate_fn=padding_fn, num_workers=4)
-    test_loader = DataLoader(test_datasets, batch_size=batch_size, shuffle=True, drop_last=True, pin_memory=True,
-                             collate_fn=padding_fn, num_workers=4)
+                               num_workers=4)
+    test_loader = DataLoader(test_datasets, batch_size=1, shuffle=True, pin_memory=True,
+                              num_workers=4)
     valid_loader = DataLoader(valid_sets, batch_size=batch_size, shuffle=True, drop_last=True, pin_memory=True,
-                              collate_fn=padding_fn, num_workers=4)
+                            num_workers=4)
 
     print(f"训练集大小{len(train_sets)}， 验证集大小{len(valid_sets)}， 测试集大小{len(test_datasets)}")
     return train_loader, test_loader, valid_loader
+
+
+if __name__ == "__main__":
+    train_loader, test_loader, valid_loader = create_data_loader(2)
+    data = next(iter(train_loader))
+    print(data[0].shape)
+    print(data[1].shape)
+    print(data[2].shape)
+    print(data[3].shape)
+    print(data[4].shape)
+    print(data[5].shape)
+    print(data[6].shape)
+
